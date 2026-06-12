@@ -21,6 +21,14 @@ function getCommentFilePath(file: ReviewFile | undefined, comment: DiffReviewCom
   return comparison?.displayPath ?? file.path;
 }
 
+function formatCommentBody(body: string): string {
+  return body
+    .trim()
+    .split("\n")
+    .map((line) => `   ${line}`)
+    .join("\n");
+}
+
 function formatLocation(comment: DiffReviewComment, file: ReviewFile | undefined): string {
   const filePath = getCommentFilePath(file, comment);
   const scopePrefix = comment.scope === "commit" && comment.commitSha
@@ -45,21 +53,27 @@ function formatLocation(comment: DiffReviewComment, file: ReviewFile | undefined
 
 export function composeReviewPrompt(files: ReviewFile[], payload: ReviewSubmitPayload): string {
   const fileMap = new Map(files.map((file) => [file.id, file]));
+  const reviewComments = payload.comments.filter((comment) => comment.body.trim().length > 0);
+  const overallComment = payload.overallComment.trim();
+
+  if (overallComment.length === 0 && reviewComments.length === 0) {
+    return "";
+  }
+
   const lines: string[] = [];
 
   lines.push("Please address the following feedback");
   lines.push("");
 
-  const overallComment = payload.overallComment.trim();
   if (overallComment.length > 0) {
     lines.push(overallComment);
     lines.push("");
   }
 
-  payload.comments.forEach((comment, index) => {
+  reviewComments.forEach((comment, index) => {
     const file = fileMap.get(comment.fileId);
     lines.push(`${index + 1}. ${formatLocation(comment, file)}`);
-    lines.push(`   ${comment.body.trim()}`);
+    lines.push(formatCommentBody(comment.body));
     lines.push("");
   });
 

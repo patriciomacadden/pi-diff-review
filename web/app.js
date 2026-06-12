@@ -101,13 +101,13 @@ function scopeLabel(scope) {
 function scopeHint(scope) {
   switch (scope) {
     case "git-diff":
-      return "Review working tree changes against HEAD. Hover or click line numbers in the gutter to add an inline comment.";
+      return "Review working tree changes against HEAD. Click or drag line numbers in the gutter to add inline comments.";
     case "last-commit":
-      return "Review the last commit against its parent. Hover or click line numbers in the gutter to add an inline comment.";
+      return "Review the last commit against its parent. Click or drag line numbers in the gutter to add inline comments.";
     case "commit":
       return "Review the selected past commit against its parent. Use the commit dropdown in the sidebar to move through history.";
     default:
-      return "Review the current working tree snapshot. Hover or click line numbers in the gutter to add a code review comment.";
+      return "Review the current working tree snapshot. Click or drag line numbers in the gutter to add code review comments.";
   }
 }
 
@@ -673,9 +673,12 @@ function clearViewZones() {
 function renderCommentDOM(comment, onDelete) {
   const container = document.createElement("div");
   container.className = "view-zone-container";
+  const lineLabel = comment.endLine != null && comment.endLine !== comment.startLine
+    ? `lines ${comment.startLine}-${comment.endLine}`
+    : `line ${comment.startLine}`;
   const title = comment.side === "file"
     ? `File comment • ${scopeLabel(comment.scope)}`
-    : `${comment.side === "original" ? "Original" : "Modified"} line ${comment.startLine} • ${scopeLabel(comment.scope)}`;
+    : `${comment.side === "original" ? "Original" : "Modified"} ${lineLabel} • ${scopeLabel(comment.scope)}`;
 
   container.innerHTML = `
     <div class="mb-2 flex items-center justify-between gap-3">
@@ -747,8 +750,10 @@ function updateDecorations() {
   const modifiedRanges = [];
 
   for (const comment of comments) {
+    const startLine = comment.startLine;
+    const endLine = comment.endLine ?? comment.startLine;
     const range = {
-      range: new monacoApi.Range(comment.startLine, 1, comment.startLine, 1),
+      range: new monacoApi.Range(Math.min(startLine, endLine), 1, Math.max(startLine, endLine), 1),
       options: {
         isWholeLine: true,
         className: comment.side === "original" ? "review-comment-line-original" : "review-comment-line-modified",
@@ -887,58 +892,127 @@ function renderAll(options = {}) {
 
 function createGlyphHoverActions(editor, side) {
   let hoverDecoration = [];
+  let dragDecoration = [];
+  let dragStartLine = null;
 
-  function openDraftAtLine(line) {
+  function isCommentGutterTarget(target) {
+    return target.type === monacoApi.editor.MouseTargetType.GUTTER_GLYPH_MARGIN || target.type === monacoApi.editor.MouseTargetType.GUTTER_LINE_NUMBERS;
+  }
+
+  function canStartComment() {
+    const file = activeFile();
+    return !!file && canCommentOnSide(file, side) && isActiveFileReady();
+  }
+
+  function clearDragDecoration() {
+    dragDecoration = editor.deltaDecorations(dragDecoration, []);
+  }
+
+  function updateDragHint(endLine) {
+    if (dragStartLine == null || !endLine) return;
+    const startLine = Math.min(dragStartLine, endLine);
+    const rangeEndLine = Math.max(dragStartLine, endLine);
+    const label = startLine === rangeEndLine ? `line ${startLine}` : `lines ${startLine}-${rangeEndLine}`;
+    modeHintEl.textContent = `Selecting ${label} for a ${side} comment — release to add comment`;
+  }
+
+  function updateDragDecoration(endLine) {
+    if (dragStartLine == null || !endLine) {
+      clearDragDecoration();
+      updateToggleButtons();
+      return;
+    }
+
+    const startLine = Math.min(dragStartLine, endLine);
+    const rangeEndLine = Math.max(dragStartLine, endLine);
+    dragDecoration = editor.deltaDecorations(dragDecoration, [{
+      range: new monacoApi.Range(startLine, 1, rangeEndLine, 1),
+      options: {
+        isWholeLine: true,
+        className: "review-pending-comment-line",
+        glyphMarginClassName: "review-pending-comment-glyph",
+      },
+    }]);
+    updateDragHint(endLine);
+  }
+
+  function openDraftAtRange(startLine, endLine) {
     const file = activeFile();
     if (!file || !canCommentOnSide(file, side) || !isActiveFileReady()) return;
+    const rangeStartLine = Math.min(startLine, endLine);
+    const rangeEndLine = Math.max(startLine, endLine);
     state.comments.push({
       id: `${Date.now()}:${Math.random().toString(16).slice(2)}`,
       fileId: file.id,
       scope: state.currentScope,
       commitSha: state.currentScope === "commit" ? state.selectedCommitSha : undefined,
       side,
-      startLine: line,
-      endLine: line,
+      startLine: rangeStartLine,
+      endLine: rangeEndLine,
       body: "",
     });
     updateCommentsUI();
-    editor.revealLineInCenter(line);
+    editor.revealLineInCenter(rangeStartLine);
   }
 
   editor.onMouseMove((event) => {
-    const file = activeFile();
-    if (!file || !canCommentOnSide(file, side) || !isActiveFileReady()) {
+    if (!canStartComment()) {
       hoverDecoration = editor.deltaDecorations(hoverDecoration, []);
+      clearDragDecoration();
+      dragStartLine = null;
       return;
     }
 
     const target = event.target;
-    if (target.type === monacoApi.editor.MouseTargetType.GUTTER_GLYPH_MARGIN || target.type === monacoApi.editor.MouseTargetType.GUTTER_LINE_NUMBERS) {
+    if (isCommentGutterTarget(target)) {
       const line = target.position?.lineNumber;
       if (!line) return;
+
+      if (dragStartLine != null) {
+        hoverDecoration = editor.deltaDecorations(hoverDecoration, []);
+        updateDragDecoration(line);
+        return;
+      }
+
       hoverDecoration = editor.deltaDecorations(hoverDecoration, [{
         range: new monacoApi.Range(line, 1, line, 1),
         options: { glyphMarginClassName: "review-glyph-plus" },
       }]);
-    } else {
+    } else if (dragStartLine == null) {
       hoverDecoration = editor.deltaDecorations(hoverDecoration, []);
     }
   });
 
   editor.onMouseLeave(() => {
     hoverDecoration = editor.deltaDecorations(hoverDecoration, []);
+    if (dragStartLine == null) clearDragDecoration();
   });
 
   editor.onMouseDown((event) => {
-    const file = activeFile();
-    if (!file || !canCommentOnSide(file, side) || !isActiveFileReady()) return;
+    if (!canStartComment()) return;
 
     const target = event.target;
-    if (target.type === monacoApi.editor.MouseTargetType.GUTTER_GLYPH_MARGIN || target.type === monacoApi.editor.MouseTargetType.GUTTER_LINE_NUMBERS) {
-      const line = target.position?.lineNumber;
-      if (!line) return;
-      openDraftAtLine(line);
-    }
+    if (!isCommentGutterTarget(target)) return;
+
+    const line = target.position?.lineNumber;
+    if (!line) return;
+    dragStartLine = line;
+    updateDragDecoration(line);
+    event.event?.preventDefault?.();
+    event.event?.stopPropagation?.();
+  });
+
+  editor.onMouseUp((event) => {
+    if (dragStartLine == null) return;
+
+    const startLine = dragStartLine;
+    dragStartLine = null;
+    clearDragDecoration();
+    updateToggleButtons();
+
+    const target = event.target;
+    if (!isCommentGutterTarget(target) || !target.position?.lineNumber) return;
+    openDraftAtRange(startLine, target.position.lineNumber);
   });
 }
 

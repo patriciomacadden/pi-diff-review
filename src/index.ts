@@ -262,8 +262,13 @@ export default function (pi: ExtensionAPI) {
       }
 
       const prompt = composeReviewPrompt(files, message);
-      ctx.ui.setEditorText(prompt);
-      ctx.ui.notify("Inserted review feedback into the editor.", "info");
+      if (prompt.length === 0) {
+        ctx.ui.notify("Review finished with no feedback.", "info");
+        return;
+      }
+
+      pi.sendUserMessage(prompt);
+      ctx.ui.notify("Submitted review feedback to pi.", "info");
     } catch (error) {
       activeWaitingUIDismiss?.();
       closeActiveWindow();
